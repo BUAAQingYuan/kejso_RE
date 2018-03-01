@@ -1,0 +1,137 @@
+import tensorflow as tf
+from ops import conv2d
+import numpy
+import math
+from sklearn.metrics import classification_report
+from sklearn.metrics import recall_score,accuracy_score,f1_score
+
+
+max_document_length = 150
+NUM_CLASSES = 8
+EMBEDDING_SIZE = 200
+POS_SZIE = 100
+FINAL_EMBEDDING_SIZE = EMBEDDING_SIZE + POS_SZIE
+start_learning_rate = 1e-3
+
+# input is sentence
+train_data_node = tf.placeholder(tf.float32,shape=(None,max_document_length,FINAL_EMBEDDING_SIZE))
+
+train_labels_node = tf.placeholder(tf.float32,shape=(None,NUM_CLASSES))
+
+dropout_keep_prob = tf.placeholder(tf.float32,name="dropout_keep_prob")
+
+
+filter_sizes = [2,3,4,5]
+filter_numbers = [300,200,100,50]
+# input attention matrix
+d_c = sum(filter_numbers)
+# class embeddings matrix
+init_class = math.sqrt(6.0 / (d_c + NUM_CLASSES))
+fc_weights = tf.Variable(tf.random_uniform([d_c, NUM_CLASSES],
+                                                minval=-init_class,
+                                                maxval=init_class,
+                                                dtype=tf.float32))
+fc_biases = tf.Variable(tf.constant(0.1, shape=[NUM_CLASSES], dtype=tf.float32))
+
+
+# model
+# data = [batch_size,n,embed]
+def model(data):
+    # exp_data = [batch_size,n,embed,1]
+    exp_data = tf.expand_dims(data, axis=-1)
+    pooled_outputs = []
+    for idx, filter_size in enumerate(filter_sizes):
+        conv = conv2d(exp_data,filter_numbers[idx],filter_size,FINAL_EMBEDDING_SIZE,name="kernel%d" % idx)
+        # 1-max pooling,leave a tensor of shape[batch_size,1,1,num_filters]
+        pool = tf.nn.max_pool(conv,ksize=[1,max_document_length-filter_size+1,1,1],strides=[1, 1, 1, 1],padding='VALID')
+        pooled_outputs.append(tf.squeeze(pool))
+
+        if len(filter_sizes) > 1:
+            cnn_output = tf.concat(pooled_outputs, axis=1)
+        else:
+            cnn_output = pooled_outputs[0]
+
+    # add dropout
+    # dropout_output = [batch_size, num_filter]
+    dropout_output = tf.nn.dropout(cnn_output, dropout_keep_prob)
+    # fc layer
+    fc_output = tf.matmul(dropout_output, fc_weights) + fc_biases
+    return fc_output
+
+
+# Training computation
+logits = tf.nn.softmax(model(train_data_node))
+# loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=train_labels_node,
+#                                                              logits=tf.clip_by_value(logits,1e-10,1.0)))
+# L2 regularization for the fully connected parameters.
+regularizers = (tf.nn.l2_loss(fc_weights) + tf.nn.l2_loss(fc_biases))
+# loss += 0.05 * regularizers
+# tf.summary.scalar('loss', loss)
+
+# optimizer
+global_step = tf.Variable(0, name="global_step", trainable=False)
+learning_rate = tf.Variable(start_learning_rate,name="learning_rate")
+# learning_rate=tf.train.exponential_decay(start_learning_rate,global_step*BATCH_SIZE,train_size,0.9,staircase=True)
+optimizer = tf.train.AdamOptimizer(learning_rate)
+# grads_and_vars = optimizer.compute_gradients(loss)
+# train_op = optimizer.apply_gradients(grads_and_vars, global_step=global_step)
+
+# Evaluate model
+train_predict = tf.argmax(logits,1)
+train_label = tf.argmax(train_labels_node,1)
+# train accuracy
+train_correct_pred = tf.equal(train_predict,train_label)
+train_accuracy = tf.reduce_mean(tf.cast(train_correct_pred, tf.float32))
+# tf.summary.scalar('acc', train_accuracy)
+
+# run the testing
+sess = tf.Session()
+saver = tf.train.Saver()
+saver.restore(sess, "model.ckpt")
+
+
+test_word = numpy.load("test_word.npy")
+test_pos = numpy.load("test_pos.npy")
+test_labels = numpy.load("test_dis_label.npy")
+print(test_word.shape)
+print(test_pos.shape)
+print(test_labels.shape)
+# concatenation
+x_test = numpy.concatenate((test_word, test_pos), axis=2)
+y_test = test_labels
+print(x_test.shape)
+
+
+def predict(x_batch, y_batch):
+    feed_dict = {train_data_node: x_batch, train_labels_node: y_batch, dropout_keep_prob: 1.0}
+    acc, y_truth, y_predict = sess.run([train_accuracy, train_label, train_predict], feed_dict=feed_dict)
+    return acc, y_truth, y_predict
+
+
+test_acc, test_truth, test_predict = predict(x_test, y_test)
+# store labels
+print("test acc: " + str(test_acc))
+
+include_labels = [0, 1, 2, 3, 4, 5, 6]
+macro_acc = accuracy_score(test_truth, test_predict)
+macro_recall = recall_score(test_truth, test_predict, labels=include_labels, average='macro')
+macro_f1 = f1_score(test_truth, test_predict, labels=include_labels, average='macro')
+print("{}: acc {:g}, recall {:g}, f1 {:g} ".format("macro", macro_acc, macro_recall, macro_f1))
+
+micro_recall = recall_score(test_truth, test_predict, labels=include_labels, average='micro')
+micro_f1 = f1_score(test_truth, test_predict, labels=include_labels, average='micro')
+print("{}: acc {:g}, recall {:g}, f1 {:g} ".format("micro", macro_acc, micro_recall, micro_f1))
+
+print("test size: " + str(len(test_truth))+" "+str(len(test_predict)))
+
+# relation label to number
+# 0 Cause
+# 1 Describe
+# 2 From
+# 3 Identity
+# 4 Medicine
+# 5 Part
+# 6 Position
+# 7 Other
+target_names = ['Cause', 'Describe', 'From', 'Identity', 'Medicine', 'Part', 'Position']
+print(classification_report(test_truth, test_predict, labels=include_labels, target_names=target_names, digits=4))
